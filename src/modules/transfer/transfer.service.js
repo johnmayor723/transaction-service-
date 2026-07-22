@@ -14,7 +14,11 @@ const { client: fineractClient } = require("../../integrations/fineract");
 
 const { adapter: nibssAdapter } = require("../../integrations/nibss");
 
+const { client: notificationClient } = require("../../integrations/notification");
+
 const config = require("../../config/app.config");
+
+const { logger } = require("../../config");
 
 const {
     NotFoundError,
@@ -308,7 +312,15 @@ class TransferService {
      */
     async executeMovement(transfer, request = {}) {
 
+        let sourceAccount = null;
+
         try {
+
+            sourceAccount =
+                await accountClient.getAccount(
+                    transfer.sourceAccountNumber,
+                    { correlationId: request.correlationId }
+                );
 
             if (transfer.type === "NIP") {
 
@@ -342,12 +354,6 @@ class TransferService {
 
             } else {
 
-                const sourceAccount =
-                    await accountClient.getAccount(
-                        transfer.sourceAccountNumber,
-                        { correlationId: request.correlationId }
-                    );
-
                 const destinationAccount =
                     await accountClient.getAccount(
                         transfer.destinationAccountNumber,
@@ -377,20 +383,30 @@ class TransferService {
                 transfer.amount
             );
 
-            return repository.updateStatus(
-                transfer.id,
-                {
-                    status: "SUCCESSFUL",
-                    message: "Transfer completed successfully.",
-                    extra: {
-                        completedAt: new Date()
+            const completed =
+                await repository.updateStatus(
+                    transfer.id,
+                    {
+                        status: "SUCCESSFUL",
+                        message: "Transfer completed successfully.",
+                        extra: {
+                            completedAt: new Date()
+                        }
                     }
-                }
+                );
+
+            await this.notifyBestEffort(
+                transfer,
+                sourceAccount,
+                "SUCCESSFUL",
+                request.correlationId
             );
+
+            return completed;
 
         } catch (error) {
 
-            return repository.updateStatus(
+            await repository.updateStatus(
                 transfer.id,
                 {
                     status: "FAILED",
@@ -399,9 +415,84 @@ class TransferService {
                         failureReason: error.message
                     }
                 }
-            ).then(() => {
-                throw error;
+            );
+
+            await this.notifyBestEffort(
+                transfer,
+                sourceAccount,
+                "FAILED",
+                request.correlationId
+            );
+
+            throw error;
+
+        }
+
+    }
+
+    /**
+     * ==========================================================
+     * Notify (best-effort)
+     * ==========================================================
+     *
+     * Never throws, never blocks, never changes the transfer's
+     * own outcome — a failure here is only ever logged. Skips
+     * silently if sourceAccount couldn't be resolved (e.g. the
+     * very first accountClient call in executeMovement failed).
+     */
+    async notifyBestEffort(transfer, sourceAccount, status, correlationId) {
+
+        if (!sourceAccount) {
+
+            return;
+
+        }
+
+        try {
+
+            const type =
+                status === "SUCCESSFUL"
+                    ? "TRANSFER_COMPLETED"
+                    : "TRANSFER_FAILED";
+
+            const message =
+                status === "SUCCESSFUL"
+                    ? `Your transfer of ${transfer.amount} ${transfer.currency} to ${transfer.destinationAccountNumber} was successful. Ref: ${transfer.reference}.`
+                    : `Your transfer of ${transfer.amount} ${transfer.currency} to ${transfer.destinationAccountNumber} failed. Ref: ${transfer.reference}.`;
+
+            await notificationClient.send({
+
+                userId:
+                    transfer.initiatorUserId,
+
+                channel:
+                    sourceAccount.email ? "EMAIL" : "SMS",
+
+                type,
+
+                recipient:
+                    sourceAccount.email || sourceAccount.phoneNumber,
+
+                subject:
+                    status === "SUCCESSFUL" ? "Transfer Successful" : "Transfer Failed",
+
+                message,
+
+                correlationId
+
             });
+
+        } catch (error) {
+
+            logger.warn(
+                {
+                    error: {
+                        message: error.message
+                    },
+                    transferId: transfer.id
+                },
+                "Failed to send transfer notification."
+            );
 
         }
 

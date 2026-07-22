@@ -64,6 +64,15 @@ const config = {
         url: process.env.ACCOUNT_SERVICE_URL
     },
 
+    /**
+     * Not in the hard-required env list — notifications are
+     * best-effort and must never block or fail a transfer, even
+     * if this URL is unset or the service is unreachable.
+     */
+    notificationService: {
+        url: process.env.NOTIFICATION_SERVICE_URL
+    },
+
     fineract: {
         url: process.env.FINERACT_URL,
         tenant: process.env.FINERACT_TENANT,

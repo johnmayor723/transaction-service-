@@ -5,6 +5,7 @@ jest.mock("../../../src/modules/limits/limits.service");
 jest.mock("../../../src/integrations/account/account.client");
 jest.mock("../../../src/integrations/fineract/fineract.client");
 jest.mock("../../../src/integrations/nibss/dummy.adapter");
+jest.mock("../../../src/integrations/notification/notification.client");
 
 const repository = require("../../../src/modules/transfer/transfer.repository");
 const otpService = require("../../../src/modules/otp/otp.service");
@@ -13,6 +14,7 @@ const limitsService = require("../../../src/modules/limits/limits.service");
 const accountClient = require("../../../src/integrations/account/account.client");
 const fineractClient = require("../../../src/integrations/fineract/fineract.client");
 const nibssAdapter = require("../../../src/integrations/nibss/dummy.adapter");
+const notificationClient = require("../../../src/integrations/notification/notification.client");
 
 const transferService = require("../../../src/modules/transfer/transfer.service");
 
