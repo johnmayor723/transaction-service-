@@ -1,0 +1,210 @@
+==================================================================
+TRANSACTION SERVICE - API ENDPOINTS
+==================================================================
+
+Base URL   : http://<host>:<port>  (default port 3004)
+Mounting   : All routes are mounted at "/".
+
+Every response (success and error) is wrapped in the standard
+envelope:
+
+    Success:
+    {
+        "success": true,
+        "message": "",
+        "data": {},
+        "meta": { "timestamp": "" }
+    }
+
+    Error:
+    {
+        "success": false,
+        "message": "",
+        "error": { "code": "", "details": null },
+        "meta": { "timestamp": "", "correlationId": "" }
+    }
+
+Fields marked (required) must be present in the request body.
+Fields marked "Bearer <accessToken>" require the header:
+    Authorization: Bearer <accessToken>
+
+CORRELATION ID
+--------------
+Every response carries an X-Correlation-Id header (echoed from
+the request if you send one, otherwise generated). Include it
+in bug reports — it's threaded through every log line and error
+response for this request.
+
+    X-Correlation-Id: <uuid>            (optional on request)
+
+IDEMPOTENCY
+-----------
+Both money-moving endpoints (start/confirm a transfer) require
+an Idempotency-Key header:
+
+    Idempotency-Key: <client-generated unique string>
+
+- First request with a key: processed normally, response cached.
+- Repeat request, same key + same body: returns the exact cached
+  response again (no reprocessing, no duplicate transfer).
+- Repeat request, same key + different body: 409 Conflict.
+- Repeat request while the first is still processing: 409 Conflict.
+- Missing header: 400 Validation error.
+
+OTP STEP-UP
+-----------
+Every transfer is a two-step flow: initiate (validates + sends an
+OTP) -> confirm (verifies the OTP + actually moves money). Nothing
+is debited/credited until confirm() succeeds.
+
+In non-production environments, the plaintext OTP is included
+directly in the initiate response (field "otp") so the flow can
+be curl-tested without a live email/SMS provider. It is omitted
+in production.
+
+==================================================================
+HEALTH
+==================================================================
+
+------------------------------------------------------------------
+GET /health
+------------------------------------------------------------------
+Auth        : None
+Body        : None
+
+Response data:
+{
+    "service": "<SERVICE_NAME>",
+    "version": "<SERVICE_VERSION>",
+    "environment": "<NODE_ENV>"
+}
+
+==================================================================
+TRANSFERS
+==================================================================
+
+------------------------------------------------------------------
+POST /transfers
+------------------------------------------------------------------
+Auth        : Bearer <accessToken>
+Headers     : Idempotency-Key: <unique string>   (required)
+Description : Initiates a transfer. Resolves and ownership-checks
+              the source account (the caller's own account, from
+              the JWT), runs limits + fraud checks, resolves the
+              transfer type, creates the transfer as PENDING_OTP,
+              and sends an OTP. No money moves yet.
+
+              Transfer type is inferred automatically:
+              - destinationBankCode omitted + destination account
+                belongs to the same Fineract client as the caller
+                -> type "OWN_ACCOUNT"
+              - destinationBankCode omitted + destination account
+                belongs to a different customer in this bank
+                -> type "INTERNAL"
+              - destinationBankCode present -> type "NIP"
+                (routed through the dummy NIBSS adapter for now)
+
+Request body:
+{
+    "destinationAccountNumber": "2043451147",   // (required) exactly 10 digits
+    "amount":                   500,            // (required) greater than 0
+    "narration":                "Rent",         // optional, max 100 chars
+    "destinationBankCode":      "058"           // optional; presence selects NIP type
+}
+
+Response data (201):
+{
+    "transferId": "<mongo id>",
+    "reference":  "TXN...",
+    "status":     "PENDING_OTP",
+    "expiresAt":  "<ISO date>",
+    "otp":        "123456"          // non-production only
+}
+
+Possible errors:
+- 400 ValidationError    : bad payload
+- 422 BusinessRuleError  : source account not active, per-transaction/
+                            daily limit exceeded, fraud BLOCK decision
+- 400 ValidationError    : source and destination account are the same
+- 409 ConflictError      : Idempotency-Key reused with a different
+                            payload, or a request with that key is
+                            still processing
+
+------------------------------------------------------------------
+POST /transfers/:id/confirm
+------------------------------------------------------------------
+Auth        : Bearer <accessToken>
+Headers     : Idempotency-Key: <unique string>   (required)
+Description : Verifies the OTP from the initiate step, then
+              actually moves the money: OWN_ACCOUNT/INTERNAL post
+              a Fineract withdrawal on the source account and a
+              deposit on the destination account; NIP calls the
+              (currently dummy) NIBSS adapter. Records daily
+              limit usage and marks the transfer SUCCESSFUL or
+              FAILED, with the full transition recorded in
+              statusHistory either way.
+
+Request body:
+{
+    "code": "123456"    // (required) the 6-digit OTP from initiate
+}
+
+Response data (200):
+{
+    "transferId": "<mongo id>",
+    "reference":  "TXN...",
+    "status":     "SUCCESSFUL"
+}
+
+Possible errors:
+- 404 NotFoundError      : transfer not found
+- 403 AuthorizationError : transfer does not belong to the caller
+- 422 BusinessRuleError  : transfer is not in PENDING_OTP (already
+                            processed), OTP invalid/expired/max
+                            attempts, or the downstream posting
+                            (Fineract/NIBSS) failed -> transfer is
+                            marked FAILED with failureReason set
+
+------------------------------------------------------------------
+GET /transfers/:id
+------------------------------------------------------------------
+Auth        : Bearer <accessToken>
+Description : Retrieves a single transfer (must belong to the
+              caller) including its full status history.
+
+Response data:
+{
+    "id": "<mongo id>",
+    "reference": "TXN...",
+    "type": "OWN_ACCOUNT | INTERNAL | NIP",
+    "sourceAccountNumber": "2035167176",
+    "destinationAccountNumber": "2043451147",
+    "destinationBankCode": null,
+    "amount": 500,
+    "currency": "NGN",
+    "narration": "Rent",
+    "status": "PENDING_OTP | PROCESSING | SUCCESSFUL | FAILED | REJECTED",
+    "failureReason": null,
+    "statusHistory": [
+        { "status": "PENDING_OTP", "message": "Transfer initiated.", "changedAt": "<ISO date>" }
+    ],
+    "createdAt": "<ISO date>",
+    "completedAt": "<ISO date>|null"
+}
+
+------------------------------------------------------------------
+GET /transfers?page=&limit=
+------------------------------------------------------------------
+Auth        : Bearer <accessToken>
+Description : Paginated transfer history for the caller, newest
+              first.
+
+Query params:
+    page   optional, default 1, positive integer
+    limit  optional, default 20, 1-100
+
+Response data:
+{
+    "transfers": [ { ...same shape as GET /transfers/:id... } ],
+    "pagination": { "page": 1, "limit": 20, "total": 3 }
+}
