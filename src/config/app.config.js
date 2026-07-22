@@ -89,6 +89,18 @@ const config = {
         reviewThreshold: Number(process.env.FRAUD_REVIEW_THRESHOLD || 2000000)
     },
 
+    scheduler: {
+        pollIntervalSeconds: Number(process.env.SCHEDULER_POLL_INTERVAL_SECONDS || 60)
+    },
+
+    bulkTransfer: {
+        maxItems: Number(process.env.MAX_BULK_ITEMS || 100)
+    },
+
+    reversal: {
+        windowHours: Number(process.env.REVERSAL_WINDOW_HOURS || 48)
+    },
+
     email: {
         host: process.env.EMAIL_HOST || "smtp.gmail.com",
         port: Number(process.env.EMAIL_PORT || 587),

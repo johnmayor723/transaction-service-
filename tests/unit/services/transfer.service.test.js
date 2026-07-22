@@ -280,4 +280,178 @@ describe("Transfer Service", () => {
 
     });
 
+    describe("initiateReversal", () => {
+
+        const successfulOriginal = {
+            id: "transfer-1",
+            initiatorUserId: "user-1",
+            status: "SUCCESSFUL",
+            type: "INTERNAL",
+            isReversal: false,
+            reversed: false,
+            sourceAccountNumber: "1111111111",
+            destinationAccountNumber: "2222222222",
+            amount: 1000,
+            reference: "TXN123",
+            completedAt: new Date()
+        };
+
+        test("creates a reversal transfer and sends an OTP", async () => {
+
+            repository.findById.mockResolvedValue(successfulOriginal);
+            limitsService.check.mockResolvedValue(undefined);
+            fraudService.assess.mockResolvedValue({ decision: "ALLOW", reasons: [] });
+            repository.create.mockResolvedValue({ id: "reversal-1" });
+
+            accountClient.getAccount.mockResolvedValue({
+                accountNumber: "1111111111",
+                email: "jane@example.com",
+                phoneNumber: "08000000000"
+            });
+
+            otpService.sendTransferOtp.mockResolvedValue({ expiresAt: new Date(), code: "222222", channel: "EMAIL" });
+            repository.updateStatus.mockResolvedValue({});
+
+            const result = await transferService.initiateReversal(user, "transfer-1", fakeRequest());
+
+            expect(result.transferId).toBe("reversal-1");
+            expect(repository.create).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    isReversal: true,
+                    reversalOf: "transfer-1",
+                    sourceAccountNumber: "2222222222",
+                    destinationAccountNumber: "1111111111"
+                })
+            );
+
+        });
+
+        test("rejects reversing a non-successful transfer", async () => {
+
+            repository.findById.mockResolvedValue({
+                ...successfulOriginal,
+                status: "PENDING_OTP"
+            });
+
+            await expect(
+                transferService.initiateReversal(user, "transfer-1", fakeRequest())
+            ).rejects.toThrow("Only successful transfers can be reversed");
+
+        });
+
+        test("rejects reversing a NIP transfer", async () => {
+
+            repository.findById.mockResolvedValue({
+                ...successfulOriginal,
+                type: "NIP"
+            });
+
+            await expect(
+                transferService.initiateReversal(user, "transfer-1", fakeRequest())
+            ).rejects.toThrow("NIP transfers cannot be reversed");
+
+        });
+
+        test("rejects reversing an already-reversed transfer", async () => {
+
+            repository.findById.mockResolvedValue({
+                ...successfulOriginal,
+                reversed: true
+            });
+
+            await expect(
+                transferService.initiateReversal(user, "transfer-1", fakeRequest())
+            ).rejects.toThrow("already been reversed");
+
+        });
+
+        test("rejects reversing outside the policy window", async () => {
+
+            repository.findById.mockResolvedValue({
+                ...successfulOriginal,
+                completedAt: new Date(Date.now() - (49 * 60 * 60 * 1000))
+            });
+
+            await expect(
+                transferService.initiateReversal(user, "transfer-1", fakeRequest())
+            ).rejects.toThrow("can only be reversed within");
+
+        });
+
+        test("rejects reversing someone else's transfer", async () => {
+
+            repository.findById.mockResolvedValue({
+                ...successfulOriginal,
+                initiatorUserId: "someone-else"
+            });
+
+            await expect(
+                transferService.initiateReversal(user, "transfer-1", fakeRequest())
+            ).rejects.toThrow("does not belong to you");
+
+        });
+
+        test("rejects a second reversal while one is already pending confirmation", async () => {
+
+            repository.findById.mockResolvedValue(successfulOriginal);
+
+            repository.findPendingReversalByOriginal.mockResolvedValue({
+                id: "existing-reversal",
+                status: "PENDING_OTP"
+            });
+
+            await expect(
+                transferService.initiateReversal(user, "transfer-1", fakeRequest())
+            ).rejects.toThrow("already pending confirmation");
+
+        });
+
+    });
+
+    describe("confirmReversal", () => {
+
+        test("executes the reversal and marks the original as reversed", async () => {
+
+            const reversal = {
+                id: "reversal-1",
+                initiatorUserId: "user-1",
+                status: "PENDING_OTP",
+                otpChannel: "EMAIL",
+                isReversal: true,
+                reversalOf: "transfer-1"
+            };
+
+            repository.findPendingReversalByOriginal.mockResolvedValue(reversal);
+            otpService.verifyTransferOtp.mockResolvedValue(true);
+            repository.updateStatus.mockResolvedValue({});
+
+            jest.spyOn(transferService, "executeMovement").mockResolvedValue({
+                id: "reversal-1",
+                reference: "REV123",
+                status: "SUCCESSFUL"
+            });
+
+            // transferId param is the ORIGINAL transfer's id, not
+            // the reversal's own id — same :id as initiateReversal.
+            const result = await transferService.confirmReversal(user, "transfer-1", "222222", fakeRequest());
+
+            expect(result.status).toBe("SUCCESSFUL");
+            expect(repository.markReversed).toHaveBeenCalledWith("transfer-1", "reversal-1");
+
+            transferService.executeMovement.mockRestore();
+
+        });
+
+        test("rejects when there is no pending reversal for this transfer", async () => {
+
+            repository.findPendingReversalByOriginal.mockResolvedValue(null);
+
+            await expect(
+                transferService.confirmReversal(user, "transfer-1", "222222", fakeRequest())
+            ).rejects.toThrow("No pending reversal found");
+
+        });
+
+    });
+
 });

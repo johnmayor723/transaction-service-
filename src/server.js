@@ -1,5 +1,7 @@
 const app = require("./app");
 
+const scheduler = require("./modules/scheduler/scheduler.service");
+
 const {
     app: appConfig,
     logger,
@@ -22,8 +24,12 @@ const start = async () => {
             );
         });
 
+        scheduler.start();
+
         const shutdown = async (signal) => {
             logger.info(`${signal} received. Shutting down gracefully...`);
+
+            scheduler.stop();
 
             server.close(async () => {
                 const mongoose = require("mongoose");

@@ -39,8 +39,9 @@ response for this request.
 
 IDEMPOTENCY
 -----------
-Both money-moving endpoints (start/confirm a transfer) require
-an Idempotency-Key header:
+Every money-moving endpoint (any POST that initiates or confirms
+a transfer, standing order, or bulk transfer) requires an
+Idempotency-Key header:
 
     Idempotency-Key: <client-generated unique string>
 
@@ -53,14 +54,26 @@ an Idempotency-Key header:
 
 OTP STEP-UP
 -----------
-Every transfer is a two-step flow: initiate (validates + sends an
-OTP) -> confirm (verifies the OTP + actually moves money). Nothing
-is debited/credited until confirm() succeeds.
+Every money-moving action is a two-step flow: initiate (validates
++ sends an OTP) -> confirm (verifies the OTP + actually moves
+money, or activates a standing order). Nothing is debited/credited
+until confirm() succeeds. A standing order's recurring occurrences
+are NOT individually OTP-gated — only the initial creation is; the
+scheduler executes each due occurrence automatically afterward.
 
 In non-production environments, the plaintext OTP is included
 directly in the initiate response (field "otp") so the flow can
 be curl-tested without a live email/SMS provider. It is omitted
 in production.
+
+SCHEDULER
+---------
+A single-instance in-process poller (SCHEDULER_POLL_INTERVAL_SECONDS,
+default 60s) picks up due SCHEDULED transfers and ACTIVE standing
+order occurrences and executes them through the same code path as
+an immediate confirm(). Limits and fraud checks are re-run at
+execution time, since conditions may have changed since
+authorization.
 
 ==================================================================
 HEALTH
@@ -82,6 +95,9 @@ Response data:
 ==================================================================
 TRANSFERS
 ==================================================================
+Own-account, same-bank (internal), and NIP transfers. Also covers
+scheduled transfers (optional scheduledAt on initiate) and
+reversals.
 
 ------------------------------------------------------------------
 POST /transfers
@@ -104,12 +120,17 @@ Description : Initiates a transfer. Resolves and ownership-checks
               - destinationBankCode present -> type "NIP"
                 (routed through the dummy NIBSS adapter for now)
 
+              If scheduledAt is supplied, authorization (OTP) still
+              happens now on confirm, but execution is deferred to
+              the scheduler — see POST /transfers/:id/confirm.
+
 Request body:
 {
-    "destinationAccountNumber": "2043451147",   // (required) exactly 10 digits
-    "amount":                   500,            // (required) greater than 0
-    "narration":                "Rent",         // optional, max 100 chars
-    "destinationBankCode":      "058"           // optional; presence selects NIP type
+    "destinationAccountNumber": "2043451147",       // (required) exactly 10 digits
+    "amount":                   500,                // (required) greater than 0
+    "narration":                "Rent",              // optional, max 100 chars
+    "destinationBankCode":      "058",               // optional; presence selects NIP type
+    "scheduledAt":               "2026-08-01T09:00:00.000Z"  // optional ISO 8601, must be in the future
 }
 
 Response data (201):
@@ -122,10 +143,9 @@ Response data (201):
 }
 
 Possible errors:
-- 400 ValidationError    : bad payload
+- 400 ValidationError    : bad payload, or source/destination are the same account
 - 422 BusinessRuleError  : source account not active, per-transaction/
                             daily limit exceeded, fraud BLOCK decision
-- 400 ValidationError    : source and destination account are the same
 - 409 ConflictError      : Idempotency-Key reused with a different
                             payload, or a request with that key is
                             still processing
@@ -135,14 +155,15 @@ POST /transfers/:id/confirm
 ------------------------------------------------------------------
 Auth        : Bearer <accessToken>
 Headers     : Idempotency-Key: <unique string>   (required)
-Description : Verifies the OTP from the initiate step, then
-              actually moves the money: OWN_ACCOUNT/INTERNAL post
-              a Fineract withdrawal on the source account and a
-              deposit on the destination account; NIP calls the
-              (currently dummy) NIBSS adapter. Records daily
-              limit usage and marks the transfer SUCCESSFUL or
-              FAILED, with the full transition recorded in
-              statusHistory either way.
+Description : Verifies the OTP from the initiate step.
+              - No scheduledAt (or it's already due): executes
+                immediately — OWN_ACCOUNT/INTERNAL post a Fineract
+                withdrawal on the source account and a deposit on
+                the destination; NIP calls the (dummy) NIBSS
+                adapter. Marks SUCCESSFUL or FAILED.
+              - scheduledAt in the future: transitions to SCHEDULED
+                instead: the scheduler executes it later and this
+                call returns immediately with status "SCHEDULED".
 
 Request body:
 {
@@ -153,7 +174,7 @@ Response data (200):
 {
     "transferId": "<mongo id>",
     "reference":  "TXN...",
-    "status":     "SUCCESSFUL"
+    "status":     "SUCCESSFUL | SCHEDULED"
 }
 
 Possible errors:
@@ -183,8 +204,15 @@ Response data:
     "amount": 500,
     "currency": "NGN",
     "narration": "Rent",
-    "status": "PENDING_OTP | PROCESSING | SUCCESSFUL | FAILED | REJECTED",
+    "status": "PENDING_OTP | SCHEDULED | PROCESSING | SUCCESSFUL | FAILED | REJECTED",
+    "scheduledAt": "<ISO date>|null",
     "failureReason": null,
+    "isReversal": false,
+    "reversalOf": "<mongo id>|null",       // set on a reversal record, points at the original
+    "reversed": false,                      // set on the original once its reversal succeeds
+    "reversalTransferId": "<mongo id>|null",
+    "standingOrderId": "<mongo id>|null",   // set if generated by a standing order occurrence
+    "bulkTransferId": "<mongo id>|null",    // set if generated as a bulk transfer item
     "statusHistory": [
         { "status": "PENDING_OTP", "message": "Transfer initiated.", "changedAt": "<ISO date>" }
     ],
@@ -207,4 +235,280 @@ Response data:
 {
     "transfers": [ { ...same shape as GET /transfers/:id... } ],
     "pagination": { "page": 1, "limit": 20, "total": 3 }
+}
+
+------------------------------------------------------------------
+POST /transfers/:id/reverse
+------------------------------------------------------------------
+Auth        : Bearer <accessToken>
+Headers     : Idempotency-Key: <unique string>   (required)
+Description : Initiates a reversal of transfer :id (the ORIGINAL
+              transfer). Eligibility is checked before an OTP is
+              ever sent: the original must belong to the caller,
+              be SUCCESSFUL, be type OWN_ACCOUNT or INTERNAL (a
+              NIP transfer already left the bank — the dummy
+              adapter can't pull it back), not already reversed,
+              not already have a reversal pending confirmation,
+              and be within REVERSAL_WINDOW_HOURS (default 48) of
+              completedAt. Creates a new Transfer with source and
+              destination swapped, PENDING_OTP, and sends an OTP.
+
+Request body: None
+
+Response data (201):
+{
+    "transferId": "<mongo id of the new reversal transfer>",
+    "reference":  "REV...",
+    "status":     "PENDING_OTP",
+    "expiresAt":  "<ISO date>",
+    "otp":        "123456"          // non-production only
+}
+
+Possible errors:
+- 404 NotFoundError      : original transfer not found
+- 403 AuthorizationError : original transfer does not belong to the caller
+- 422 BusinessRuleError  : not SUCCESSFUL, is a NIP transfer, already
+                            reversed, a reversal is already pending,
+                            outside the reversal window, limit/fraud
+                            rejected
+
+------------------------------------------------------------------
+POST /transfers/:id/reverse/confirm
+------------------------------------------------------------------
+Auth        : Bearer <accessToken>
+Headers     : Idempotency-Key: <unique string>   (required)
+Description : :id is the ORIGINAL transfer's id (same one used for
+              POST /transfers/:id/reverse) — you don't need to
+              track the reversal's own generated id. Verifies the
+              OTP, executes the reversal (withdrawal from the
+              original destination, deposit to the original
+              source), and on success marks the original transfer
+              reversed: true.
+
+Request body:
+{
+    "code": "123456"    // (required) the 6-digit OTP from reverse-initiate
+}
+
+Response data (200):
+{
+    "transferId": "<mongo id of the reversal transfer>",
+    "reference":  "REV...",
+    "status":     "SUCCESSFUL"
+}
+
+Possible errors:
+- 404 NotFoundError      : no pending reversal found for this transfer
+- 403 AuthorizationError : reversal does not belong to the caller
+- 422 BusinessRuleError  : OTP invalid/expired/max attempts, or the
+                            downstream posting failed
+
+==================================================================
+STANDING ORDERS
+==================================================================
+Recurring transfers, authorized once. The scheduler executes each
+due occurrence automatically without further OTP prompts.
+
+------------------------------------------------------------------
+POST /standing-orders
+------------------------------------------------------------------
+Auth        : Bearer <accessToken>
+Headers     : Idempotency-Key: <unique string>   (required)
+Description : Validates the source/destination + limits + fraud
+              (against the per-occurrence amount), creates the
+              order as PENDING_OTP, sends an OTP.
+
+Request body:
+{
+    "destinationAccountNumber": "2043451147",       // (required) exactly 10 digits
+    "amount":                   1000,                // (required) greater than 0
+    "narration":                "Rent",              // optional, max 100 chars
+    "destinationBankCode":      "058",               // optional; NIP occurrence if present
+    "frequency":                "DAILY|WEEKLY|MONTHLY", // (required)
+    "startDate":                "2026-08-01T09:00:00.000Z", // (required) ISO 8601
+    "endDate":                  "2027-08-01T09:00:00.000Z", // optional ISO 8601
+    "maxExecutions":            12                    // optional positive integer
+}
+
+Response data (201):
+{
+    "standingOrderId": "<mongo id>",
+    "reference":        "SO...",
+    "status":           "PENDING_OTP",
+    "expiresAt":        "<ISO date>",
+    "otp":              "123456"     // non-production only
+}
+
+------------------------------------------------------------------
+POST /standing-orders/:id/confirm
+------------------------------------------------------------------
+Auth        : Bearer <accessToken>
+Headers     : Idempotency-Key: <unique string>   (required)
+Description : Verifies the OTP, activates the order, and computes
+              the first nextRunAt (startDate if still in the
+              future at confirm time, otherwise the next
+              occurrence after now).
+
+Request body:
+{
+    "code": "123456"    // (required)
+}
+
+Response data (200):
+{
+    "standingOrderId": "<mongo id>",
+    "status":           "ACTIVE",
+    "nextRunAt":        "<ISO date>"
+}
+
+------------------------------------------------------------------
+POST /standing-orders/:id/cancel
+POST /standing-orders/:id/pause
+POST /standing-orders/:id/resume
+------------------------------------------------------------------
+Auth        : Bearer <accessToken>
+Description : cancel: any non-terminal order -> CANCELLED (terminal).
+              pause: ACTIVE -> PAUSED only.
+              resume: PAUSED -> ACTIVE only, recomputes nextRunAt
+              from now.
+
+Request body: None
+
+Response data: the standing order in the same shape as GET below.
+
+------------------------------------------------------------------
+GET /standing-orders/:id
+------------------------------------------------------------------
+Auth        : Bearer <accessToken>
+
+Response data:
+{
+    "id": "<mongo id>",
+    "reference": "SO...",
+    "sourceAccountNumber": "2035167176",
+    "destinationAccountNumber": "2043451147",
+    "destinationBankCode": null,
+    "amount": 1000,
+    "narration": "Rent",
+    "frequency": "DAILY|WEEKLY|MONTHLY",
+    "startDate": "<ISO date>",
+    "endDate": "<ISO date>|null",
+    "nextRunAt": "<ISO date>|null",
+    "maxExecutions": 12,
+    "executionCount": 3,
+    "status": "PENDING_OTP|ACTIVE|PAUSED|CANCELLED|COMPLETED",
+    "statusHistory": [ { "status": "ACTIVE", "message": "...", "changedAt": "<ISO date>" } ],
+    "createdAt": "<ISO date>"
+}
+
+A failed occurrence (e.g. a limit exceeded that day) is logged in
+statusHistory but does NOT cancel the order — it's retried on the
+next scheduled tick.
+
+------------------------------------------------------------------
+GET /standing-orders?page=&limit=
+------------------------------------------------------------------
+Auth        : Bearer <accessToken>
+Description : Paginated standing order list for the caller.
+
+Response data:
+{
+    "standingOrders": [ { ...same shape as GET /standing-orders/:id... } ],
+    "pagination": { "page": 1, "limit": 20, "total": 2 }
+}
+
+==================================================================
+BULK TRANSFERS
+==================================================================
+Batch submission (e.g. payroll). One OTP authorizes the whole
+batch. Internal transfers only (OWN_ACCOUNT/INTERNAL) — no NIP
+items in a bulk batch.
+
+------------------------------------------------------------------
+POST /bulk-transfers
+------------------------------------------------------------------
+Auth        : Bearer <accessToken>
+Headers     : Idempotency-Key: <unique string>   (required)
+Description : Validates every item's format, sums totalAmount,
+              runs limits + fraud against the TOTAL (not
+              per-item), creates the batch as PENDING_OTP, sends
+              ONE OTP for the whole batch. Capped at MAX_BULK_ITEMS
+              (default 100) items.
+
+Request body:
+{
+    "items": [
+        { "destinationAccountNumber": "2043451147", "amount": 1000, "narration": "Employee 1" },
+        { "destinationAccountNumber": "2067008717", "amount": 1500, "narration": "Employee 2" }
+    ],
+    "narration": "August payroll"   // optional fallback narration for items without their own
+}
+
+Response data (201):
+{
+    "bulkTransferId": "<mongo id>",
+    "reference":       "BLK...",
+    "itemCount":       2,
+    "totalAmount":     2500,
+    "status":          "PENDING_OTP",
+    "expiresAt":       "<ISO date>",
+    "otp":             "123456"     // non-production only
+}
+
+------------------------------------------------------------------
+POST /bulk-transfers/:id/confirm
+------------------------------------------------------------------
+Auth        : Bearer <accessToken>
+Headers     : Idempotency-Key: <unique string>   (required)
+Description : Verifies the single OTP, then processes items
+              SEQUENTIALLY (not parallel, to keep daily-limit
+              accounting correct). Each item becomes its own
+              Transfer record. Final batch status is COMPLETED
+              (all succeeded), PARTIALLY_FAILED (some did), or
+              FAILED (none did).
+
+Request body:
+{
+    "code": "123456"    // (required)
+}
+
+Response data (200):
+{
+    "id": "<mongo id>",
+    "reference": "BLK...",
+    "sourceAccountNumber": "2035167176",
+    "totalAmount": 2500,
+    "itemCount": 2,
+    "status": "COMPLETED|PARTIALLY_FAILED|FAILED",
+    "items": [
+        {
+            "destinationAccountNumber": "2043451147",
+            "amount": 1000,
+            "narration": "Employee 1",
+            "status": "SUCCESSFUL|FAILED",
+            "transferId": "<mongo id>|null",
+            "failureReason": null
+        }
+    ],
+    "statusHistory": [ ... ],
+    "createdAt": "<ISO date>"
+}
+
+------------------------------------------------------------------
+GET /bulk-transfers/:id
+------------------------------------------------------------------
+Auth        : Bearer <accessToken>
+Description : Retrieves a single batch with full per-item detail
+              (same shape as the confirm response above).
+
+------------------------------------------------------------------
+GET /bulk-transfers?page=&limit=
+------------------------------------------------------------------
+Auth        : Bearer <accessToken>
+Description : Paginated bulk transfer list for the caller.
+
+Response data:
+{
+    "bulkTransfers": [ { ...same shape as GET /bulk-transfers/:id... } ],
+    "pagination": { "page": 1, "limit": 20, "total": 1 }
 }

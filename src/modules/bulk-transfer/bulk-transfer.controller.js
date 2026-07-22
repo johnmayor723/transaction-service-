@@ -1,9 +1,9 @@
-const service = require("./transfer.service");
+const service = require("./bulk-transfer.service");
 
 const { success, created } = require("../../responses/api.response");
 
 /**
- * Initiate Transfer
+ * Initiate Bulk Transfer
  */
 const initiate = async (req, res) => {
 
@@ -11,14 +11,14 @@ const initiate = async (req, res) => {
         await service.initiate(req.user, req.body, req);
 
     return created(res, {
-        message: "Transfer initiated. Enter the OTP to confirm.",
+        message: "Bulk transfer initiated. Enter the OTP to confirm.",
         data: result
     });
 
 };
 
 /**
- * Confirm Transfer
+ * Confirm Bulk Transfer
  */
 const confirm = async (req, res) => {
 
@@ -31,14 +31,14 @@ const confirm = async (req, res) => {
         );
 
     return success(res, {
-        message: "Transfer confirmed.",
+        message: "Bulk transfer processed.",
         data: result
     });
 
 };
 
 /**
- * Get Transfer By ID
+ * Get Bulk Transfer By ID
  */
 const getById = async (req, res) => {
 
@@ -46,14 +46,14 @@ const getById = async (req, res) => {
         await service.getById(req.user, req.params.id);
 
     return success(res, {
-        message: "Transfer retrieved successfully.",
+        message: "Bulk transfer retrieved successfully.",
         data: result
     });
 
 };
 
 /**
- * Transfer History
+ * Bulk Transfer History
  */
 const history = async (req, res) => {
 
@@ -74,46 +74,7 @@ const history = async (req, res) => {
         });
 
     return success(res, {
-        message: "Transfer history retrieved successfully.",
-        data: result
-    });
-
-};
-
-/**
- * Initiate Reversal
- */
-const reverse = async (req, res) => {
-
-    const result =
-        await service.initiateReversal(
-            req.user,
-            req.params.id,
-            req
-        );
-
-    return created(res, {
-        message: "Reversal initiated. Enter the OTP to confirm.",
-        data: result
-    });
-
-};
-
-/**
- * Confirm Reversal
- */
-const confirmReverse = async (req, res) => {
-
-    const result =
-        await service.confirmReversal(
-            req.user,
-            req.params.id,
-            req.body.code,
-            req
-        );
-
-    return success(res, {
-        message: "Reversal confirmed.",
+        message: "Bulk transfers retrieved successfully.",
         data: result
     });
 
@@ -127,10 +88,6 @@ module.exports = {
 
     getById,
 
-    history,
-
-    reverse,
-
-    confirmReverse
+    history
 
 };

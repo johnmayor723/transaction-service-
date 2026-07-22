@@ -32,7 +32,9 @@ class TransferService {
      *
      * Validates the source/destination + limits + fraud, then
      * creates the transfer as PENDING_OTP and sends the OTP.
-     * No money moves yet — that only happens on confirm().
+     * No money moves yet — that only happens on confirm(). If
+     * scheduledAt is supplied, authorization still happens now,
+     * but execution is deferred to the scheduler.
      */
     async initiate(user, data, request) {
 
@@ -40,7 +42,8 @@ class TransferService {
             destinationAccountNumber,
             destinationBankCode,
             amount,
-            narration
+            narration,
+            scheduledAt
         } = data;
 
         const sourceAccount =
@@ -131,6 +134,9 @@ class TransferService {
 
                 reference,
 
+                scheduledAt:
+                    scheduledAt ? new Date(scheduledAt) : null,
+
                 idempotencyKey:
                     request.headers["idempotency-key"],
 
@@ -204,7 +210,9 @@ class TransferService {
      * Confirm Transfer
      * ==========================================================
      *
-     * Verifies the OTP, then posts the actual money movement.
+     * Verifies the OTP. A scheduled transfer (future scheduledAt)
+     * moves to SCHEDULED for the scheduler to pick up later;
+     * everything else executes immediately.
      */
     async confirm(user, transferId, code, request) {
 
@@ -241,6 +249,29 @@ class TransferService {
             transfer.otpChannel
         );
 
+        if (transfer.scheduledAt && transfer.scheduledAt > new Date()) {
+
+            const scheduled =
+                await repository.updateStatus(
+                    transfer.id,
+                    {
+                        status: "SCHEDULED",
+                        message: `OTP verified. Scheduled for ${transfer.scheduledAt.toISOString()}.`
+                    }
+                );
+
+            return {
+
+                transferId: scheduled.id,
+
+                reference: scheduled.reference,
+
+                status: scheduled.status
+
+            };
+
+        }
+
         await repository.updateStatus(
             transfer.id,
             {
@@ -248,6 +279,34 @@ class TransferService {
                 message: "OTP verified, processing."
             }
         );
+
+        const executed =
+            await this.executeMovement(transfer, request);
+
+        return {
+
+            transferId: executed.id,
+
+            reference: executed.reference,
+
+            status: executed.status
+
+        };
+
+    }
+
+    /**
+     * ==========================================================
+     * Execute Movement
+     * ==========================================================
+     *
+     * The single code path that actually moves money, once a
+     * transfer is authorized and ready to process (status
+     * PROCESSING). Reused by confirm(), the scheduler (scheduled
+     * transfers + standing order occurrences), and bulk transfer
+     * item processing.
+     */
+    async executeMovement(transfer, request = {}) {
 
         try {
 
@@ -314,35 +373,24 @@ class TransferService {
             }
 
             await limitsService.recordUsage(
-                user.userId,
+                transfer.initiatorUserId,
                 transfer.amount
             );
 
-            const completed =
-                await repository.updateStatus(
-                    transfer.id,
-                    {
-                        status: "SUCCESSFUL",
-                        message: "Transfer completed successfully.",
-                        extra: {
-                            completedAt: new Date()
-                        }
+            return repository.updateStatus(
+                transfer.id,
+                {
+                    status: "SUCCESSFUL",
+                    message: "Transfer completed successfully.",
+                    extra: {
+                        completedAt: new Date()
                     }
-                );
-
-            return {
-
-                transferId: completed.id,
-
-                reference: completed.reference,
-
-                status: completed.status
-
-            };
+                }
+            );
 
         } catch (error) {
 
-            await repository.updateStatus(
+            return repository.updateStatus(
                 transfer.id,
                 {
                     status: "FAILED",
@@ -351,11 +399,285 @@ class TransferService {
                         failureReason: error.message
                     }
                 }
-            );
-
-            throw error;
+            ).then(() => {
+                throw error;
+            });
 
         }
+
+    }
+
+    /**
+     * ==========================================================
+     * Initiate Reversal
+     * ==========================================================
+     *
+     * Eligibility is checked up front so an ineligible reversal
+     * never gets an OTP sent for it.
+     */
+    async initiateReversal(user, transferId, request) {
+
+        const original =
+            await repository.findById(transferId);
+
+        if (!original) {
+
+            throw new NotFoundError(
+                "Transfer not found."
+            );
+
+        }
+
+        if (original.initiatorUserId !== user.userId) {
+
+            throw new AuthorizationError(
+                "This transfer does not belong to you."
+            );
+
+        }
+
+        if (original.status !== "SUCCESSFUL") {
+
+            throw new BusinessRuleError(
+                "Only successful transfers can be reversed."
+            );
+
+        }
+
+        if (original.type === "NIP") {
+
+            throw new BusinessRuleError(
+                "NIP transfers cannot be reversed."
+            );
+
+        }
+
+        if (original.isReversal) {
+
+            throw new BusinessRuleError(
+                "A reversal cannot itself be reversed."
+            );
+
+        }
+
+        if (original.reversed) {
+
+            throw new BusinessRuleError(
+                "This transfer has already been reversed."
+            );
+
+        }
+
+        const existingReversal =
+            await repository.findPendingReversalByOriginal(
+                original.id
+            );
+
+        if (existingReversal) {
+
+            throw new BusinessRuleError(
+                "A reversal for this transfer is already pending confirmation."
+            );
+
+        }
+
+        const windowMs =
+            config.reversal.windowHours * 60 * 60 * 1000;
+
+        if (
+            !original.completedAt ||
+            (Date.now() - original.completedAt.getTime()) > windowMs
+        ) {
+
+            throw new BusinessRuleError(
+                `Transfers can only be reversed within ${config.reversal.windowHours} hours of completion.`
+            );
+
+        }
+
+        await limitsService.check({
+            userId: user.userId,
+            amount: original.amount
+        });
+
+        const fraudResult =
+            await fraudService.assess({
+                amount: original.amount
+            });
+
+        if (fraudResult.decision === "BLOCK") {
+
+            throw new BusinessRuleError(
+                "This reversal cannot be processed."
+            );
+
+        }
+
+        const reference =
+            `REV${Date.now()}${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
+
+        const reversal =
+            await repository.create({
+
+                initiatorUserId:
+                    user.userId,
+
+                sourceAccountNumber:
+                    original.destinationAccountNumber,
+
+                destinationAccountNumber:
+                    original.sourceAccountNumber,
+
+                type:
+                    original.type,
+
+                amount:
+                    original.amount,
+
+                narration:
+                    `Reversal of ${original.reference}`,
+
+                reference,
+
+                idempotencyKey:
+                    request.headers["idempotency-key"],
+
+                correlationId:
+                    request.correlationId,
+
+                fraudDecision:
+                    fraudResult.decision,
+
+                isReversal: true,
+
+                reversalOf:
+                    original.id,
+
+                statusHistory: [{
+
+                    status: "PENDING_OTP",
+
+                    message: "Reversal initiated.",
+
+                    changedAt: new Date()
+
+                }]
+
+            });
+
+        const requester =
+            await accountClient.getAccount(
+                user.accountNumber,
+                { correlationId: request.correlationId }
+            );
+
+        const otpResult =
+            await otpService.sendTransferOtp(
+                reversal.id,
+                {
+                    email: requester.email,
+                    phoneNumber: requester.phoneNumber
+                }
+            );
+
+        await repository.updateStatus(
+            reversal.id,
+            {
+                status: "PENDING_OTP",
+                message: "OTP sent.",
+                extra: {
+                    otpChannel: otpResult.channel
+                }
+            }
+        );
+
+        const response = {
+
+            transferId: reversal.id,
+
+            reference,
+
+            status: "PENDING_OTP",
+
+            expiresAt: otpResult.expiresAt
+
+        };
+
+        if (!config.isProduction) {
+
+            response.otp = otpResult.code;
+
+        }
+
+        return response;
+
+    }
+
+    /**
+     * ==========================================================
+     * Confirm Reversal
+     * ==========================================================
+     *
+     * transferId here is the ORIGINAL transfer's id — the same
+     * :id used for POST /transfers/:id/reverse — so the caller
+     * never needs to track the reversal's own generated id.
+     */
+    async confirmReversal(user, transferId, code, request) {
+
+        const reversal =
+            await repository.findPendingReversalByOriginal(transferId);
+
+        if (!reversal) {
+
+            throw new NotFoundError(
+                "No pending reversal found for this transfer."
+            );
+
+        }
+
+        if (reversal.initiatorUserId !== user.userId) {
+
+            throw new AuthorizationError(
+                "This reversal does not belong to you."
+            );
+
+        }
+
+        await otpService.verifyTransferOtp(
+            reversal.id,
+            code,
+            reversal.otpChannel
+        );
+
+        await repository.updateStatus(
+            reversal.id,
+            {
+                status: "PROCESSING",
+                message: "OTP verified, processing."
+            }
+        );
+
+        const executed =
+            await this.executeMovement(reversal, request);
+
+        if (executed.status === "SUCCESSFUL") {
+
+            await repository.markReversed(
+                reversal.reversalOf,
+                reversal.id
+            );
+
+        }
+
+        return {
+
+            transferId: executed.id,
+
+            reference: executed.reference,
+
+            status: executed.status
+
+        };
 
     }
 
@@ -456,7 +778,21 @@ class TransferService {
 
             status: transfer.status,
 
+            scheduledAt: transfer.scheduledAt,
+
             failureReason: transfer.failureReason,
+
+            isReversal: transfer.isReversal,
+
+            reversalOf: transfer.reversalOf,
+
+            reversed: transfer.reversed,
+
+            reversalTransferId: transfer.reversalTransferId,
+
+            standingOrderId: transfer.standingOrderId,
+
+            bulkTransferId: transfer.bulkTransferId,
 
             statusHistory: transfer.statusHistory,
 

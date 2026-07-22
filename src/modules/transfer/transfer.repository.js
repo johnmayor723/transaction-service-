@@ -96,6 +96,56 @@ class TransferRepository {
 
     }
 
+    /**
+     * Find SCHEDULED transfers whose scheduledAt is now due.
+     */
+    async findScheduledDue(now = new Date()) {
+
+        return Transfer.find({
+            status: "SCHEDULED",
+            scheduledAt: { $lte: now }
+        });
+
+    }
+
+    /**
+     * Find the pending reversal for an original transfer, so the
+     * confirm-reversal endpoint can use the same :id as the
+     * initiate-reversal endpoint (the original transfer's id).
+     */
+    async findPendingReversalByOriginal(originalId) {
+
+        return Transfer.findOne({
+            reversalOf: originalId,
+            isReversal: true,
+            status: "PENDING_OTP"
+        }).sort({ createdAt: -1 });
+
+    }
+
+    /**
+     * Mark the original transfer as reversed once its reversal
+     * has succeeded.
+     */
+    async markReversed(id, reversalTransferId) {
+
+        return Transfer.findByIdAndUpdate(
+
+            id,
+
+            {
+                reversed: true,
+                reversalTransferId
+            },
+
+            {
+                new: true
+            }
+
+        );
+
+    }
+
 }
 
 module.exports = new TransferRepository();

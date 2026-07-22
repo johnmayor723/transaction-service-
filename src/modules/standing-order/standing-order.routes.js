@@ -2,9 +2,9 @@ const express = require("express");
 
 const router = express.Router();
 
-const controller = require("./transfer.controller");
+const controller = require("./standing-order.controller");
 
-const validator = require("./transfer.validator");
+const validator = require("./standing-order.validator");
 
 const validate = require("../../middleware/validation.middleware");
 
@@ -13,10 +13,10 @@ const authenticate = require("../../middleware/authenticate.middleware");
 const idempotency = require("../../middleware/idempotency.middleware");
 
 /**
- * Initiate Transfer
+ * Initiate Standing Order
  */
 router.post(
-    "/transfers",
+    "/standing-orders",
     authenticate,
     validator.initiate,
     validate,
@@ -25,10 +25,10 @@ router.post(
 );
 
 /**
- * Confirm Transfer
+ * Confirm Standing Order
  */
 router.post(
-    "/transfers/:id/confirm",
+    "/standing-orders/:id/confirm",
     authenticate,
     validator.confirm,
     validate,
@@ -37,10 +37,10 @@ router.post(
 );
 
 /**
- * Transfer History
+ * Standing Order History
  */
 router.get(
-    "/transfers",
+    "/standing-orders",
     authenticate,
     validator.history,
     validate,
@@ -48,10 +48,10 @@ router.get(
 );
 
 /**
- * Get Transfer By ID
+ * Get Standing Order By ID
  */
 router.get(
-    "/transfers/:id",
+    "/standing-orders/:id",
     authenticate,
     validator.getById,
     validate,
@@ -59,27 +59,36 @@ router.get(
 );
 
 /**
- * Initiate Reversal
+ * Cancel Standing Order
  */
 router.post(
-    "/transfers/:id/reverse",
+    "/standing-orders/:id/cancel",
     authenticate,
-    validator.reverse,
+    validator.getById,
     validate,
-    idempotency,
-    controller.reverse
+    controller.cancel
 );
 
 /**
- * Confirm Reversal
+ * Pause Standing Order
  */
 router.post(
-    "/transfers/:id/reverse/confirm",
+    "/standing-orders/:id/pause",
     authenticate,
-    validator.confirmReverse,
+    validator.getById,
     validate,
-    idempotency,
-    controller.confirmReverse
+    controller.pause
+);
+
+/**
+ * Resume Standing Order
+ */
+router.post(
+    "/standing-orders/:id/resume",
+    authenticate,
+    validator.getById,
+    validate,
+    controller.resume
 );
 
 module.exports = router;

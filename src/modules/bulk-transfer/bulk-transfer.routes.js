@@ -2,9 +2,9 @@ const express = require("express");
 
 const router = express.Router();
 
-const controller = require("./transfer.controller");
+const controller = require("./bulk-transfer.controller");
 
-const validator = require("./transfer.validator");
+const validator = require("./bulk-transfer.validator");
 
 const validate = require("../../middleware/validation.middleware");
 
@@ -13,10 +13,10 @@ const authenticate = require("../../middleware/authenticate.middleware");
 const idempotency = require("../../middleware/idempotency.middleware");
 
 /**
- * Initiate Transfer
+ * Initiate Bulk Transfer
  */
 router.post(
-    "/transfers",
+    "/bulk-transfers",
     authenticate,
     validator.initiate,
     validate,
@@ -25,10 +25,10 @@ router.post(
 );
 
 /**
- * Confirm Transfer
+ * Confirm Bulk Transfer
  */
 router.post(
-    "/transfers/:id/confirm",
+    "/bulk-transfers/:id/confirm",
     authenticate,
     validator.confirm,
     validate,
@@ -37,10 +37,10 @@ router.post(
 );
 
 /**
- * Transfer History
+ * Bulk Transfer History
  */
 router.get(
-    "/transfers",
+    "/bulk-transfers",
     authenticate,
     validator.history,
     validate,
@@ -48,38 +48,14 @@ router.get(
 );
 
 /**
- * Get Transfer By ID
+ * Get Bulk Transfer By ID
  */
 router.get(
-    "/transfers/:id",
+    "/bulk-transfers/:id",
     authenticate,
     validator.getById,
     validate,
     controller.getById
-);
-
-/**
- * Initiate Reversal
- */
-router.post(
-    "/transfers/:id/reverse",
-    authenticate,
-    validator.reverse,
-    validate,
-    idempotency,
-    controller.reverse
-);
-
-/**
- * Confirm Reversal
- */
-router.post(
-    "/transfers/:id/reverse/confirm",
-    authenticate,
-    validator.confirmReverse,
-    validate,
-    idempotency,
-    controller.confirmReverse
 );
 
 module.exports = router;
