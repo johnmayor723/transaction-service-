@@ -55,6 +55,56 @@ class BulkTransferRepository {
     }
 
     /**
+     * Atomically transition status only if it still matches
+     * fromStatus — closes the race where two concurrent confirm
+     * requests for the same batch could otherwise both pass their
+     * pre-checks and both process every item. Returns null if
+     * another request already claimed it.
+     */
+    async transitionStatus(
+        id,
+        {
+            fromStatus,
+            status,
+            message,
+            extra = {}
+        }
+    ) {
+
+        return BulkTransfer.findOneAndUpdate(
+
+            {
+                _id: id,
+                status: fromStatus
+            },
+
+            {
+
+                status,
+
+                ...extra,
+
+                $push: {
+
+                    statusHistory: {
+                        status,
+                        message,
+                        changedAt: new Date()
+                    }
+
+                }
+
+            },
+
+            {
+                new: true
+            }
+
+        );
+
+    }
+
+    /**
      * Transition status, appending to the audit history.
      */
     async updateStatus(

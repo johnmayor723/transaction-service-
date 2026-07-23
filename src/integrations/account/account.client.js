@@ -16,7 +16,8 @@ const client = axios.create({
 
     headers: {
         Accept: "application/json",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "x-internal-token": config.internalServiceToken
     }
 
 });
@@ -76,7 +77,7 @@ class AccountClient {
 
             const { data: response } =
                 await client.get(
-                    `/accounts/internal/accounts/${accountNumber}`,
+                    `/internal/accounts/${accountNumber}`,
                     {
                         headers: correlationId
                             ? { "X-Correlation-Id": correlationId }

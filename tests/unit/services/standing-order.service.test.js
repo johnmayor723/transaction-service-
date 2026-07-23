@@ -96,7 +96,7 @@ describe("Standing Order Service", () => {
 
             otpService.verifyTransferOtp.mockResolvedValue(true);
 
-            repository.updateStatus.mockImplementation(async (id, { extra }) => ({
+            repository.transitionStatus.mockImplementation(async (id, { extra }) => ({
                 id,
                 status: "ACTIVE",
                 nextRunAt: extra.nextRunAt

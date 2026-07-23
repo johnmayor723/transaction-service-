@@ -10,7 +10,8 @@ const required = [
     "JWT_SECRET",
     "FINERACT_URL",
     "FINERACT_TENANT",
-    "FINERACT_BASIC_AUTH"
+    "FINERACT_BASIC_AUTH",
+    "INTERNAL_SERVICE_TOKEN"
 ];
 
 const missing = required.filter(
@@ -129,7 +130,9 @@ const config = {
 
     idempotency: {
         ttlHours: Number(process.env.IDEMPOTENCY_TTL_HOURS || 24)
-    }
+    },
+
+    internalServiceToken: process.env.INTERNAL_SERVICE_TOKEN
 };
 
 module.exports = config;

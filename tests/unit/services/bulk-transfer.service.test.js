@@ -88,6 +88,7 @@ describe("Bulk Transfer Service", () => {
 
             repository.findById.mockResolvedValue(batch);
             otpService.verifyTransferOtp.mockResolvedValue(true);
+            repository.transitionStatus.mockResolvedValue({ ...batch, status: "PROCESSING" });
             repository.updateStatus.mockResolvedValue({ status: "COMPLETED" });
 
             accountClient.getAccount.mockImplementation(async (accountNumber) => ({
@@ -113,6 +114,7 @@ describe("Bulk Transfer Service", () => {
 
             repository.findById.mockResolvedValue(batch);
             otpService.verifyTransferOtp.mockResolvedValue(true);
+            repository.transitionStatus.mockResolvedValue({ ...batch, status: "PROCESSING" });
             repository.updateStatus.mockResolvedValue({ status: "PARTIALLY_FAILED" });
 
             let callCount = 0;

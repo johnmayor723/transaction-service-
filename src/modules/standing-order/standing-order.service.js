@@ -219,9 +219,10 @@ class StandingOrderService {
                 : advance(new Date(), order.frequency);
 
         const activated =
-            await repository.updateStatus(
+            await repository.transitionStatus(
                 order.id,
                 {
+                    fromStatus: "PENDING_OTP",
                     status: "ACTIVE",
                     message: "OTP verified, standing order active.",
                     extra: {
@@ -229,6 +230,14 @@ class StandingOrderService {
                     }
                 }
             );
+
+        if (!activated) {
+
+            throw new BusinessRuleError(
+                "This standing order has already been confirmed."
+            );
+
+        }
 
         return {
 

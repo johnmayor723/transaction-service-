@@ -97,6 +97,56 @@ class TransferRepository {
     }
 
     /**
+     * Atomically transition status only if it still matches
+     * fromStatus — closes the race where two concurrent confirm
+     * requests for the same transfer could otherwise both pass
+     * their pre-checks and both proceed to execute the movement.
+     * Returns null if another request already claimed it.
+     */
+    async transitionStatus(
+        id,
+        {
+            fromStatus,
+            status,
+            message,
+            extra = {}
+        }
+    ) {
+
+        return Transfer.findOneAndUpdate(
+
+            {
+                _id: id,
+                status: fromStatus
+            },
+
+            {
+
+                status,
+
+                ...extra,
+
+                $push: {
+
+                    statusHistory: {
+                        status,
+                        message,
+                        changedAt: new Date()
+                    }
+
+                }
+
+            },
+
+            {
+                new: true
+            }
+
+        );
+
+    }
+
+    /**
      * Find SCHEDULED transfers whose scheduledAt is now due.
      */
     async findScheduledDue(now = new Date()) {

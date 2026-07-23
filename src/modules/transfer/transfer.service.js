@@ -256,13 +256,22 @@ class TransferService {
         if (transfer.scheduledAt && transfer.scheduledAt > new Date()) {
 
             const scheduled =
-                await repository.updateStatus(
+                await repository.transitionStatus(
                     transfer.id,
                     {
+                        fromStatus: "PENDING_OTP",
                         status: "SCHEDULED",
                         message: `OTP verified. Scheduled for ${transfer.scheduledAt.toISOString()}.`
                     }
                 );
+
+            if (!scheduled) {
+
+                throw new BusinessRuleError(
+                    "This transfer has already been confirmed."
+                );
+
+            }
 
             return {
 
@@ -276,16 +285,26 @@ class TransferService {
 
         }
 
-        await repository.updateStatus(
-            transfer.id,
-            {
-                status: "PROCESSING",
-                message: "OTP verified, processing."
-            }
-        );
+        const claimed =
+            await repository.transitionStatus(
+                transfer.id,
+                {
+                    fromStatus: "PENDING_OTP",
+                    status: "PROCESSING",
+                    message: "OTP verified, processing."
+                }
+            );
+
+        if (!claimed) {
+
+            throw new BusinessRuleError(
+                "This transfer has already been confirmed."
+            );
+
+        }
 
         const executed =
-            await this.executeMovement(transfer, request);
+            await this.executeMovement(claimed, request);
 
         return {
 
@@ -740,16 +759,26 @@ class TransferService {
             reversal.otpChannel
         );
 
-        await repository.updateStatus(
-            reversal.id,
-            {
-                status: "PROCESSING",
-                message: "OTP verified, processing."
-            }
-        );
+        const claimed =
+            await repository.transitionStatus(
+                reversal.id,
+                {
+                    fromStatus: "PENDING_OTP",
+                    status: "PROCESSING",
+                    message: "OTP verified, processing."
+                }
+            );
+
+        if (!claimed) {
+
+            throw new BusinessRuleError(
+                "This reversal has already been confirmed."
+            );
+
+        }
 
         const executed =
-            await this.executeMovement(reversal, request);
+            await this.executeMovement(claimed, request);
 
         if (executed.status === "SUCCESSFUL") {
 

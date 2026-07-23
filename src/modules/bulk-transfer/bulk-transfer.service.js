@@ -232,13 +232,23 @@ class BulkTransferService {
             bulkTransfer.otpChannel
         );
 
-        await repository.updateStatus(
-            bulkTransfer.id,
-            {
-                status: "PROCESSING",
-                message: "OTP verified, processing items."
-            }
-        );
+        const claimed =
+            await repository.transitionStatus(
+                bulkTransfer.id,
+                {
+                    fromStatus: "PENDING_OTP",
+                    status: "PROCESSING",
+                    message: "OTP verified, processing items."
+                }
+            );
+
+        if (!claimed) {
+
+            throw new BusinessRuleError(
+                "This bulk transfer has already been confirmed."
+            );
+
+        }
 
         const sourceAccount =
             await accountClient.getAccount(

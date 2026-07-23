@@ -19,3 +19,4 @@ process.env.MAX_DAILY_AMOUNT = "10000000";
 process.env.FRAUD_REVIEW_THRESHOLD = "2000000";
 process.env.IDEMPOTENCY_TTL_HOURS = "24";
 process.env.LOG_LEVEL = "silent";
+process.env.INTERNAL_SERVICE_TOKEN = "test-internal-service-token";

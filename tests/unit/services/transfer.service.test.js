@@ -178,6 +178,10 @@ describe("Transfer Service", () => {
 
             repository.findById.mockResolvedValue(pendingTransfer);
             otpService.verifyTransferOtp.mockResolvedValue(true);
+            repository.transitionStatus.mockResolvedValue({
+                ...pendingTransfer,
+                status: "PROCESSING"
+            });
             repository.updateStatus.mockResolvedValue({
                 id: "transfer-1",
                 reference: "TXN123",
@@ -217,6 +221,12 @@ describe("Transfer Service", () => {
             otpService.verifyTransferOtp.mockResolvedValue(true);
             nibssAdapter.initiateNip.mockResolvedValue({ status: "SUCCESSFUL" });
             limitsService.recordUsage.mockResolvedValue(undefined);
+            repository.transitionStatus.mockResolvedValue({
+                ...pendingTransfer,
+                type: "NIP",
+                destinationBankCode: "058",
+                status: "PROCESSING"
+            });
             repository.updateStatus.mockResolvedValue({
                 id: "transfer-1",
                 reference: "TXN123",
@@ -240,6 +250,27 @@ describe("Transfer Service", () => {
             await expect(
                 transferService.confirm(user, "transfer-1", "123456", fakeRequest())
             ).rejects.toThrow("does not belong to you");
+
+        });
+
+        test("rejects a second concurrent confirm that loses the atomic claim", async () => {
+
+            // Simulates two requests both reading the transfer while
+            // it's still PENDING_OTP and both passing OTP verification
+            // (e.g. a retried confirm hitting an OTP already marked
+            // verified but not yet deleted). Only the request that
+            // wins the atomic PENDING_OTP -> PROCESSING transition may
+            // proceed; the loser must not double-execute the movement.
+            repository.findById.mockResolvedValue(pendingTransfer);
+            otpService.verifyTransferOtp.mockResolvedValue(true);
+            repository.transitionStatus.mockResolvedValue(null);
+
+            await expect(
+                transferService.confirm(user, "transfer-1", "123456", fakeRequest())
+            ).rejects.toThrow("already been confirmed");
+
+            expect(fineractClient.postWithdrawal).not.toHaveBeenCalled();
+            expect(nibssAdapter.initiateNip).not.toHaveBeenCalled();
 
         });
 
@@ -267,6 +298,10 @@ describe("Transfer Service", () => {
             });
 
             fineractClient.postWithdrawal.mockRejectedValue(new Error("Fineract unavailable"));
+            repository.transitionStatus.mockResolvedValue({
+                ...pendingTransfer,
+                status: "PROCESSING"
+            });
             repository.updateStatus.mockResolvedValue({});
 
             await expect(
@@ -425,7 +460,10 @@ describe("Transfer Service", () => {
 
             repository.findPendingReversalByOriginal.mockResolvedValue(reversal);
             otpService.verifyTransferOtp.mockResolvedValue(true);
-            repository.updateStatus.mockResolvedValue({});
+            repository.transitionStatus.mockResolvedValue({
+                ...reversal,
+                status: "PROCESSING"
+            });
 
             jest.spyOn(transferService, "executeMovement").mockResolvedValue({
                 id: "reversal-1",
