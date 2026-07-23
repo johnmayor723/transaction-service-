@@ -2,6 +2,8 @@ require("express-async-errors");
 
 const express = require("express");
 
+const cors = require("cors");
+
 const routes = require("./routes");
 
 const correlationId = require("./middleware/correlation-id.middleware");
@@ -12,6 +14,18 @@ const errorHandler = require("./middleware/error-handler.middleware");
 const app = express();
 
 app.disable("x-powered-by");
+
+/**
+ * CORS
+ * (Temporary: allow all origins during development, matching
+ * the Banking Template - lock this down before production.)
+ */
+app.use(
+    cors({
+        origin: true,
+        credentials: true
+    })
+);
 
 app.use(express.json());
 
